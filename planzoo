@@ -1,0 +1,452 @@
+#!/usr/bin/env ruby
+
+require 'date'
+require 'securerandom'
+
+# * Lecture
+#   + 講義一覧
+#   + カレンダに登録される
+#   |       code | subject              | abbrev      | tag | grade | term | week | s_period | e_period | teacher   | room    |
+#   |------------+----------------------+-------------+-----+-------+------+------+----------+----------+-----------+---------|
+#   | 2026093216 | プログラミング技法   | PP (1)      | PP  | B3    |    1 | Tue  |        5 |        6 | 乃村 能成 | 10,11講 |
+#   | 2026093216 | プログラミング技法   | PP (2)      | PP  | B3    |    1 | Fri  |        7 |        8 | 乃村 能成 | 10,11講 |
+#   | 2026432108 | プログラミング方法論 | PM (1学期)  | PM  | M1    |    1 | Thu  |        5 |        6 | 乃村 能成 | 303     |
+#   | 2026432108 | プログラミング方法論 | PM (2学期)  | PM  | M1    |    2 | Tue  |        3 |        4 | 乃村 能成 | 303     |
+#   | 2026432117 | ソフトウェア開発法   | SDM (1学期) | SDM | M1    |    1 | Mon  |        3 |        8 | 乃村 能成 | 303     |
+#   | 2026432118 | ソフトウェア開発法   | SDM (2学期) | SDM | M1    |    2 | Mon  |        3 |        8 | 乃村 能成 | 303     |
+#   | 2026098621 | 実践プログラミング   | SDB         | SDB | B3    |    2 | Wed  |        5 |        6 | 乃村 能成 | 11講    |
+#   | 2026093252 | 情報化における職業1  | ITP1        | ITP | B3    |    2 | Fri  |        5 |        6 | 乃村 能成 | 10,11講 |
+#   | 2026093254 | 情報化における職業2  | ITP2        | ITP | B3    |    4 | Mon  |        5 |        6 | 乃村 能成 | 10,11講 |
+#   | 2026093221 | 情報ネットワーク論   | TCC (1)     | TCC | B3    |    3 | Mon  |        3 |        4 | 乃村 能成 | 10,11講 |
+#   | 2026093221 | 情報ネットワーク論   | TCC (2)     | TCC | B3    |    3 | Thu  |        5 |        6 | 乃村 能成 | 10,11講 |
+#
+class Lecture
+  WDAY_STRING = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+  attr_reader :code, :subject, :abbrev, :tag, :grade, :week, :teacher,
+              :room, :calendar
+
+  def initialize(row, calendar)
+    @code     = row[:code]
+    @subject  = row[:subject]
+    @abbrev   = row[:abbrev]
+    @tag      = row[:tag]
+    @grade    = row[:grade]
+    @term     = row[:term].to_i
+    @week     = row[:week]
+    @s_period = row[:s_period].to_i
+    @e_period = row[:e_period].to_i
+    @teacher  = row[:teacher]
+    @room     = row[:room]
+    @calendar = calendar
+  end
+
+  def term;     calendar.term(@term);       end
+  def s_period; calendar.period(@s_period); end
+  def e_period; calendar.period(@e_period); end
+  def wday;     WDAY_STRING.index(@week);   end
+
+  def to_mhc(record_id = nil)
+    lec = self
+    [
+      "X-SC-Subject: #{abbrev}",
+      "X-SC-Location: #{room}",
+      "X-SC-Day: #{exceptional_dates}",
+      "X-SC-Time: #{s_period.s_time}-#{e_period.e_time}",
+      "X-SC-Category: Lecture",
+      "X-SC-Recurrence-Tag: #{tag}",
+      "X-SC-Cond: #{week}",
+      "X-SC-Duration: #{term.s_date.strftime("%Y%m%d")}-#{term.e_date.strftime("%Y%m%d")}",
+      "X-SC-Record-Id: #{record_id || SecureRandom.uuid.upcase}",
+      "X-SC-Sequence: 1",
+      "",
+      "#{code} #{subject}",
+    ].join("\n")
+  end
+
+  def exceptional_dates
+    lecture_wday = self.wday
+    addition, deletion = [], []
+
+    term.each_date do |date|
+
+      if date.wday != lecture_wday &&
+         calendar.deemed_wday(date) == lecture_wday
+        addition << date
+      end
+
+      next unless date.wday == lecture_wday
+
+      if calendar.deemed_wday(date) != lecture_wday || calendar.holiday?(date)
+        deletion << date
+      end
+    end
+    (addition.uniq.map {|d| d.strftime("%Y%m%d")} + deletion.uniq.map {|d| '!' + d.strftime("%Y%m%d")}).join(' ')
+  end
+end # class Lecture
+
+# * Period
+#   + 時限の開始時刻と終了時刻
+#   + カレンダに登録されない
+#   | nth | s_time | e_time |
+#   |-----+--------+--------|
+#   |   1 |  08:40 |  09:30 |
+#   |   2 |  09:40 |  10:30 |
+#   |   3 |  10:45 |  11:35 |
+#   |   4 |  11:45 |  12:35 |
+#   |   5 |  13:25 |  14:15 |
+#   |   6 |  14:25 |  15:15 |
+#   |   7 |  15:30 |  16:20 |
+#   |   8 |  16:30 |  17:20 |
+#   |   9 |  17:30 |  18:20 |
+#   |  10 |  18:30 |  19:20 |
+#
+class Period
+  def initialize(row)
+    @columns = row
+  end
+
+  def nth
+    @columns[:nth].to_i
+  end
+
+  def s_time
+    @columns[:s_time]
+  end
+
+  def e_time
+    @columns[:e_time]
+  end
+end
+
+# * Term
+#   + 各学期の Lecture を配置すべき期間 (講義開始日と終了日)
+#   + カレンダに登録されない
+#   + 試験期間を含めるかどうかは，試験をカレンダー上に配置したいかに依存する
+#   | nth |   s_date |   e_date |
+#   |-----+----------+----------|
+#   |   1 | 20260408 | 20260609 |
+#   |   2 | 20260610 | 20260806 |
+#   |   3 | 20261001 | 20261203 |
+#   |   4 | 20261204 | 20270212 |
+#
+class Term
+  attr_reader :nth, :s_date, :e_date
+
+  def initialize(row)
+    @nth = row[:nth].to_i
+    @s_date = Date.parse(row[:s_date])
+    @e_date = Date.parse(row[:e_date])
+  end
+
+  def each_date
+    (s_date..e_date).each do |date|
+      yield date
+    end
+  end
+end
+
+# * DeemedWeek
+#   + 講義時間数調整のための曜日読換表
+#   + カレンダに登録される
+#   + Lecture 配置の際に考慮される
+#   |     date | deemed_week | summary      |
+#   |----------+-------------+--------------|
+#   | 20260507 | Tue         | 火曜日の授業 |
+#   | 20260508 | Wed         | 水曜日の授業 |
+#   | 20260722 | Mon         | 月曜日の授業 |
+#   | 20261104 | Mon         | 月曜日の授業 |
+#   | 20261119 | Mon         | 月曜日の授業 |
+#   | 20270112 | Mon         | 月曜日の授業 |
+#   | 20270113 | Fri         | 金曜日の授業 |
+#   | 20270205 | Thu         | 木曜日の授業 |
+#
+class DeemedWeek
+  attr_reader :date, :deemed_week, :summary
+
+  def initialize(row)
+    @date = Date.parse(row[:date])
+    @deemed_week = row[:deemed_week]
+    @summary = row[:summary]
+  end
+
+  def wday
+    ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].index(@deemed_week)
+  end
+
+  def to_mhc(record_id = nil)
+    lec = self
+    [
+      "X-SC-Subject: #{summary}",
+      "X-SC-Location: ",
+      "X-SC-Day: #{date.strftime("%Y%m%d")}",
+      "X-SC-Time: ",
+      "X-SC-Category: ",
+      "X-SC-Recurrence-Tag: ",
+      "X-SC-Cond: ",
+      "X-SC-Duration: ",
+      "X-SC-Record-Id: #{record_id || SecureRandom.uuid.upcase}",
+      "X-SC-Sequence: 1",
+    ].join("\n")
+  end
+end
+
+# * Holiday
+#   + 学期の期間 (Term) 中において講義 Lecture を配置しない日
+#   + カレンダに登録されない
+#   + 近年補講日が Term 中にあるので補講日も入れてある
+#   |   s_date | days | summary                      |
+#   |----------+------+------------------------------|
+#   | 20260429 |    1 | 昭和の日                     |
+#   | 20260503 |    1 | 憲法記念日                   |
+#   | 20260504 |    1 | みどりの日                   |
+#   | 20260505 |    1 | こどもの日                   |
+#   | 20260506 |    1 | 振替休日                     |
+#   | 20260720 |    1 | 海の日                       |
+#   | 20260811 |    1 | 山の日                       |
+#   | 20260921 |    1 | 敬老の日                     |
+#   | 20260922 |    1 | 国民の休日                   |
+#   | 20260923 |    1 | 秋分の日                     |
+#   | 20261012 |    1 | スポーツの日                 |
+#   | 20261103 |    1 | 文化の日                     |
+#   | 20261123 |    1 | 勤労感謝の日                 |
+#   | 20270101 |    1 | 元日                         |
+#   | 20270111 |    1 | 成人の日                     |
+#   | 20270211 |    1 | 建国記念の日                 |
+#   | 20270223 |    1 | 天皇誕生日                   |
+#   | 20270321 |    1 | 春分の日                     |
+#   | 20270322 |    1 | 振替休日                     |
+#   | 20261030 |    4 | 大学祭                       |
+#   | 20261225 |   11 | 冬季休業                     |
+#   | 20270115 |    1 | 共通テスト実施に伴う臨時休講 |
+#   | 20260602 |    1 | 1学期の補講日                |
+#   | 20260730 |    1 | 2学期の補講日                |
+#   | 20261126 |    1 | 3学期の補講日                |
+#   | 20270204 |    1 | 4学期の補講日                |
+#
+class Holiday
+  attr_reader :s_date, :days, :summary
+
+  def initialize(row)
+    @s_date = Date.parse(row[:s_date])
+    @days = row[:days].to_i
+    @summary = row[:summary]
+  end
+end
+
+# * Event
+#   + 毎年発生する登録しておきたいイベント等
+#   + カレンダに登録される
+#   |   s_date | days | tag                | category      | summary                      |
+#   |----------+------+--------------------+---------------+------------------------------|
+#   | 20260402 |    1 | 入学式             |               | 入学式                       |
+#   | 20260408 |    1 | 授業開始           |               | 1学期授業開始                |
+#   | 20260812 |    6 | 夏期休業           | Holiday       | 夏期一斉休業                 |
+#   | 20260925 |    1 |                    |               | 学位記等授与式               |
+#   | 20261001 |    1 |                    |               | 秋季入学者入学式             |
+#   | 20261030 |    4 | 大学祭             |               | 大学祭                       |
+#   | 20270115 |    1 |                    |               | 共通テスト実施に伴う臨時休講 |
+#   | 20270116 |    2 | センター試験       |               | 大学入学共通テスト           |
+#   | 20270225 |    2 | 前期入試           |               | 一般入試 (前期日程)          |
+#   | 20270325 |    1 | 卒業式             |               | 学位記授与式                 |
+#   |----------+------+--------------------+---------------+------------------------------|
+#   | 20260602 |    1 |                    |               | 1学期の補講日                |
+#   | 20260730 |    1 |                    |               | 2学期の補講日                |
+#   | 20261126 |    1 |                    |               | 3学期の補講日                |
+#   | 20270204 |    1 |                    |               | 4学期の補講日                |
+#   | 20260618 |    1 | 成績登録締切       |               | 1学期 成績登録締切           |
+#   | 20260820 |    1 | 成績登録締切       |               | 2学期 成績登録締切           |
+#   | 20261012 |    1 | 成績登録締切       |               | 夏期集中 成績登録締切        |
+#   | 20261210 |    1 | 成績登録締切       |               | 3学期 成績登録締切           |
+#   | 20270221 |    1 | 成績登録締切       |               | 4学期 成績登録締切           |
+#   | 20260807 |    3 | オープンキャンパス | Work Overtime | オープンキャンパス           |
+#
+class Event
+  attr_reader :s_date, :days, :tag, :category, :summary
+
+  def initialize(row)
+    @s_date   = Date.parse(row[:s_date])
+    @days     = row[:days].to_i
+    @tag      = row[:tag]
+    @category = row[:category]
+    @summary  = row[:summary]
+  end
+
+  def to_mhc(record_id = nil)
+    lec = self
+    xsc_day = s_date.strftime("%Y%m%d")
+    xsc_day += "-#{(s_date + days - 1).strftime("%Y%m%d")}" if days > 1
+    [
+      "X-SC-Subject: #{summary}",
+      "X-SC-Location: ",
+      "X-SC-Day: #{xsc_day}",
+      "X-SC-Time: ",
+      "X-SC-Category: #{category}",
+      "X-SC-Recurrence-Tag: #{tag}",
+      "X-SC-Cond: ",
+      "X-SC-Duration: ",
+      "X-SC-Record-Id: #{record_id || SecureRandom.uuid.upcase}",
+      "X-SC-Sequence: 1",
+    ].join("\n")
+  end
+end
+
+# 学年暦 (授業日程計画) 相当のカレンダ
+class Calendar
+  def initialize(terms, periods, deemed_weeks, holidays)
+    @terms, @periods, @deemed_weeks, @holidays = terms, periods, deemed_weeks, holidays
+  end
+
+  # 学期 NTH を指定してその学期の開始日と終了日を持つ Term オブジェクトを返す
+  def term(nth)
+    @terms.find {|t| t.nth == nth}
+  end
+
+  # 時限 NTH を指定してその時限の開始時刻と終了時刻を持つ Period オブジェクトを返す
+  def period(nth)
+    @periods.find {|p| p.nth == nth}
+  end
+
+  # 曜日の読替表を返す
+  def deemed_weeks
+    @deemed_weeks
+  end
+
+  # 曜日の読替を考慮して DATE が何曜日なのかを返す
+  def deemed_wday(date)
+    (@deemed_weeks.find {|dw| dw.date == date} || date).wday
+  end
+
+  # DATE が講義日かどうかを返す
+  def holiday?(date)
+    @holidays.any? {|h| h.s_date <= date && date <= h.s_date + h.days - 1}
+  end
+end
+
+################################################################
+# Parse multiple sheets from org-file or spreadsheet.
+
+class SheetsParser
+  def self.parse(source_string)
+    sheets, sheet_name, sheet_body = [], nil, []
+
+    source_string.split("\n").each do |line|
+      # skip # comment
+      next if line =~ /^\s*#/
+
+      # in table: | ... | ... |
+      if line =~ /^\s*\|/
+        sheet_body << line
+        next
+      end
+
+      unless sheet_body.empty?
+        sheets << Sheet.new(sheet_name, sheet_body.join("\n"))
+        sheet_name, sheet_body = nil, []
+      end
+
+      # match: ** SheetName
+      if line =~ /^[*]+ ([A-Za-z_0-9]+)/
+        sheet_name = $1
+      end
+    end
+
+    unless sheet_body.empty?
+      sheets << Sheet.new(sheet_name, sheet_body.join("\n"))
+    end
+    sheets
+  end
+end
+
+class Sheet
+  include Enumerable
+
+  attr_reader :name
+
+  def initialize(sheet_name, sheet_body)
+    @name, @source_string = sheet_name, sheet_body
+  end
+
+  def each
+    colnames = []
+    @source_string.split("\n").each do |line|
+      next if line =~ /^\s*\|-/     # skip horizontal line |-
+      next unless line =~ /^\s*\|/  # skip non-table line
+
+      cols = line.sub(/^\s*\|/, '').sub(/\|\s*$/, '').split('|').map(&:strip)
+
+      if colnames.empty?
+        # take the first line as column names.
+        colnames = cols
+      else
+        yield Sheet::Row.new(Hash[colnames.zip cols])
+      end
+    end
+  end
+
+  class Row
+    def initialize(hash)
+      @columns = hash
+    end
+
+    def [](key)
+      @columns[key.to_s]
+    end
+
+  end # class Row
+end # class Sheet
+
+################################################################
+### main
+
+SPOOL_DIR = File.expand_path("~/MHC/draft")
+
+def put_mhc_file(article, debug = false)
+  record_id = SecureRandom.uuid.upcase
+  if debug
+    puts "---------------------------------------------------"
+    puts article.to_mhc(record_id)
+    puts "---------------------------------------------------"
+  else
+    puts "create #{SPOOL_DIR}/#{record_id}.mhc"
+    File.open("#{SPOOL_DIR}/#{record_id}.mhc", "w") do |f|
+      f.puts article.to_mhc(record_id)
+    end
+  end
+end
+
+if ARGV[0] == '--debug'
+  debug = true
+  ARGV.shift
+end
+
+sheets = {}
+
+SheetsParser.parse(gets(nil)).each do |sheet|
+  sheets[sheet.name] = sheet
+end
+
+terms    = sheets['Term']      .map {|row| Term.new(row)}
+periods  = sheets['Period']    .map {|row| Period.new(row)}
+dweeks   = sheets['DeemedWeek'].map {|row| DeemedWeek.new(row)}
+holidays = sheets['Holiday']   .map {|row| Holiday.new(row)}
+events   = sheets['Event']     .map {|row| Event.new(row)}
+calendar = Calendar.new(terms, periods, dweeks, holidays)
+lectures = sheets['Lecture'].map {|row| Lecture.new(row, calendar)}
+
+if !debug && !File.exist?(SPOOL_DIR)
+  $stderr.puts "Error: #{SPOOL_DIR} does not exist."
+  exit 1
+end
+
+lectures.each do |lec|
+  put_mhc_file(lec, debug)
+end
+
+calendar.deemed_weeks.each do |dw|
+  put_mhc_file(dw, debug)
+end
+
+events.each do |ev|
+  put_mhc_file(ev, debug)
+end
